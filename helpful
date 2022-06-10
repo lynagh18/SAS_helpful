@@ -1,0 +1,298 @@
+/*time programs - can add directly to code or add to run for every EG run by going to Options > SAS Programs > Additional SAS Code*/
+/* Start timer */
+%let _timer_start = %sysfunc(datetime());
+
+/* Stop timer */
+data _null_;
+  dur = datetime() - &_timer_start;
+  put 30*'-' / ' TOTAL DURATION:' dur time13.2 / 30*'-';
+run;
+
+/*pull max string len allowed by sas; otherwise truncates to 1024 or something like that*/
+libname dbo odbc dsn='CPSRMS' schema=dbo dbmax_text=32767;
+/*pull max string len allowed by sas; otherwise truncates to 1024 or something like that*/
+proc sql;
+         connect to odbc (dsn=CPSRMS dbmax_text=32767);
+              create table want as
+              select *
+                    from connection to odbc
+         (select distinct IR_IncidentReportID
+         from dbo.incidentanalysisinfo
+         where IR_ReceivedDate = '2021-07-30'
+         and IR_IncidentWorkflowStatusName not in ('Out of Scope', 'Spam'));
+quit;
+
+
+/*SELECT NUMBER OF COLUMNS AND ROWS IN A DATASET*/
+proc sql;
+   create table qc as
+	select Memname, NVar, nobs
+      from sashelp.vtable
+         where MeMName = 'FINALDATA'
+   ;
+quit;
+
+/*READ IN DATA OF VARIABLE LENGTH*/
+data new; 
+infile datalines delimiter='#';
+input race & $39. eth & $50. string & $30.;
+datalines;
+Black# Black & American# 
+white# w#
+Black/African American# Black#
+korean# asian#
+Native American# test#
+AmerInd_Creek# test#
+test# test#
+White, NAIA# white#
+White, Native American - Creek Chippewa# W75 W75#
+run;
+
+/*Delete all datasets in library*/
+proc datasets library=work kill;
+run;
+
+/*Delete Dataset*/
+proc datasets library=work; 
+	delete existing;
+run;
+
+/*Save specifiec dataset*/
+proc datasets library=work; 
+	save existing;
+run;
+
+/*GET ALL FILES IN DIRECTORY*/
+
+/*IF DATASET IS EMPTY DO THIS ELSE DO THAT*/
+options mprint;
+%macro drive(dsn);
+
+  /* Open the data set to be read */
+  %let dsid=%sysfunc(open(&dsn));
+
+  /* Determine the number of observations in the dataset */
+  %let cnt=%sysfunc(attrn(&dsid,nobs));
+
+  /* Close the data set */
+  %let rc=%sysfunc(close(&dsid));
+
+  /* If the data set is not empty, issue a PROC PRINT */
+  %if &cnt ne 0 %then %do;
+	title1 "Possible Duplicates! Records below are already in Database";
+	title2 "Your input: State =  &state2char  Year = &year2char";
+	proc print data=&dsn label;
+    run;
+  %end;
+
+  /* Otherwise, write to the output window */
+  %else %do;
+    data _null_;
+      title;
+      file print;
+      put _page_;
+      put "All imported records are new. No possible duplicates found.";
+    run;
+  %end;
+
+%mend;
+
+%drive(Dataset)
+
+
+/*get report count by fiscal year*/
+proc sql;
+connect to odbc (dsn=CPSRMS);
+	create table FY_Rpts as
+	select *
+		from connection to odbc
+(SELECT DATEPART(yyyy, DATEADD(mm, 3, IR_ReceivedDate)) AS FY, COUNT(distinct IR_DocumentNumber) AS row_count
+FROM dbo.incidentanalysisinfo
+where IR_DocumentNumber like 'I%'
+and DATEPART(yyyy, DATEADD(mm, 3, IR_ReceivedDate)) in (2018, 2019, 2020)
+GROUP BY DATEPART(yyyy, DATEADD(mm, 3, IR_ReceivedDate)));
+quit;
+
+/*Pull Received Date and All Products for Reports*/
+proc sql;
+connect to odbc (dsn=CPSRMS);
+	create table want as
+	select *
+		from connection to odbc
+(select distinct IR_IncidentReportID, IR_ReceivedDate, IP_ProductTypeCategoryName, IP_ProductNumber
+from dbo.incidentanalysisinfo
+where IR_ReceivedDate > '2021-03-20'
+and IP_ProductTypeCategoryName is not null
+and IR_IncidentWorkflowStatusName not in ('Out of Scope', 'Spam'));
+quit;
+
+/*Transpose by Products*/
+proc sql noprint; 
+   select max(obs) into :obs from(select count(*) as obs from want group by IR_IncidentReportID);
+/*TRANSPOSE BY MULITPLE VARS*/
+proc summary data=want nway; 
+   class IR_IncidentReportID IR_ReceivedDate;
+   output out=Prods_Transposed(drop=_:) idgroup(out[&obs](IP_ProductNumber IP_ProductTypeCategoryName)=);
+   run; 
+
+/* RENAME NEW VAR TO OLD VAR NAME AND DELETE OLD VAR*/
+ data Docs1 (drop= IR_IncidentNarrative IP_ProductDescription IR_ShortIncidentNarrative 
+			rename=(IR_IncidentNarrative2=IR_IncidentNarrative IP_ProductDescription2=IP_ProductDescription
+					IR_ShortIncidentNarrative2=IR_ShortIncidentNarrative)
+			);
+set Docs;
+length IR_IncidentNarrative2 $32767 IP_ProductDescription2 $32767 IR_ShortIncidentNarrative2 $32767;
+IR_IncidentNarrative2 = compress(IR_IncidentNarrative,'0D0A'x,' ');
+IP_ProductDescription2 = compress(IP_ProductDescription,'0D0A'x,' ');
+IR_ShortIncidentNarrative2 = compress(IR_ShortIncidentNarrative,'0D0A'x,' ');
+/*REMOVE APOSTROPHE IF IN MIDDLE OF WORD*/
+if prxmatch("/\w'\w/i",IR_IncidentNarrative2) then IR_IncidentNarrative2 = compress(IR_IncidentNarrative2,"'");
+if prxmatch("/\w'\w/i",IP_ProductDescription2) then IP_ProductDescription2 = compress(IP_ProductDescription2,"'");
+if prxmatch("/\w'\w/i",IR_ShortIncidentNarrative2) then IR_ShortIncidentNarrative2 = compress(IR_ShortIncidentNarrative2,"'");
+run;
+
+/*REMOVE CARRIAGE RETURN*/
+data Docs1 (drop= IR_IncidentNarrative  
+			rename=(IR_IncidentNarrative2=IR_IncidentNarrative)
+			);
+set Docs;
+length IR_IncidentNarrative2 $32767;
+IR_IncidentNarrative2 = compress(IR_IncidentNarrative,'0D0A'x,' ');
+/*REMOVE APOSTROPHE IF IN MIDDLE OF WORD*/
+if prxmatch("/\w'\w/i",IR_IncidentNarrative2) then IR_IncidentNarrative2 = compress(IR_IncidentNarrative2,"'");
+run;
+
+/*Efficiently Output rows of dataset by manually specifying row number*/
+/*More efficient than using _n_*/
+data want;
+    do i = 80, 81, 88, 89;
+        set have point = i;
+        output;
+    end;
+    stop;
+run;
+
+/*select columns of dataset by index/col #*/
+proc sql;
+    create table ColList as 
+	select a.name as ColName, monotonic() as ColNum
+    from sashelp.vcolumn a
+    where a.libname = 'WORK'
+          AND a.memname = 'MYDATA';
+quit;
+
+/*e.g. select cols 2 - 4*/
+proc sql;
+select ColName into :keepcols separated by ','
+from ColList where ColNum between 2 and 4;
+quit;
+
+%put &keepcols;
+
+proc sql;
+create table MyData2 as
+    select &keepcols
+    from MyData;
+quit;
+
+
+/*Long to wide format for reports on one row with multiple prods and victims*/
+/*	- need to do the data pulls and transposes separately for prods and vics and then join at end*/
+
+/*PRODUCTS*/
+proc sql;
+connect to odbc (dsn=CPSRMS);
+	create table prods as
+	select *
+		from connection to odbc
+(select distinct ip_productnumber, ip_incidentproductid, ir_incidentreportid, IR_ReceivedDate
+from dbo.incidentanalysisinfo
+where ir_incidentreportid = '3577152');
+quit;
+/*VICTIMS*/
+proc sql;
+connect to odbc (dsn=CPSRMS);
+	create table vics as
+	select *
+		from connection to odbc
+(select distinct iv_ageyears, iv_incidentvictimid, ir_incidentreportid, IR_ReceivedDate
+from dbo.incidentanalysisinfo
+where ir_incidentreportid = '3577152');
+quit;
+
+proc sql noprint; 
+   select max(obs) into :obs from(select count(*) as obs from prods group by IR_IncidentReportID);
+/*TRANSPOSE BY MULITPLE VARS*/
+proc summary data=prods nway; 
+   class IR_IncidentReportID IR_ReceivedDate;
+   output out=Prods_Transposed(drop=_:) idgroup(out[&obs](IP_ProductNumber ip_incidentproductid)=);
+   run; 
+proc sql noprint; 
+   select max(obs) into :obs from(select count(*) as obs from vics group by IR_IncidentReportID);
+proc summary data=vics nway; 
+   class IR_IncidentReportID IR_ReceivedDate;
+   output out=Vics_Transposed(drop=_:) idgroup(out[&obs](iv_incidentvictimid iv_ageyears)=);
+   run; 
+/*JOIN DATA*/
+proc sql;
+create table final as
+select a.*, b.*
+from Prods_Transposed a, Vics_Transposed b
+where a.IR_IncidentReportID = b.IR_IncidentReportID;
+quit;
+
+
+/*PULL IRP TABLES RATHER THAN DBO*/
+proc sql; connect to odbc (dsn=CPSRMS);
+	create table prods2 as
+	select *
+		from connection to odbc
+	(select distinct p.incidentreportid, p.incidentproductid, p.productcategoryid
+     from irp.incidentproduct p, irp.incidentreport r
+     where p.incidentreportid = r.incidentreportid
+	 and p.incidentreportid = '3577152');
+	 quit;
+proc sql; connect to odbc (dsn=CPSRMS);
+	create table vics2 as
+	select *
+		from connection to odbc
+	(select distinct v.incidentreportid, v.incidentvictimid, v.ageyears
+     from irp.incidentvictim v, irp.incidentreport r
+     where v.incidentreportid = r.incidentreportid
+	 and v.incidentreportid = '3577152');
+	 quit;
+proc sql;
+create table join_all as
+select * from prods2 p, vics2 v
+where p.incidentreportid = v.incidentreportid;
+quit;
+/*transpose*/
+proc sql noprint; 
+   select max(obs) into :obs from(select count(*) as obs from prods2 group by IncidentReportID);
+proc summary data=prods2 nway; 
+   class IncidentReportID;
+   output out=Prods_Transposed2(drop=_:) idgroup(out[&obs](incidentproductid productcategoryid)=);
+   run; 
+proc sql noprint; 
+   select max(obs) into :obs from(select count(*) as obs from vics2 group by IncidentReportID);
+proc summary data=vics2 nway; 
+   class IncidentReportID;
+   output out=Vics_Transposed2(drop=_:) idgroup(out[&obs](incidentvictimid ageyears)=);
+   run; 
+/*JOIN DATA*/
+proc sql;
+create table final2 as
+select a.*, b.*
+from Prods_Transposed2 a, Vics_Transposed2 b
+where a.IncidentReportID = b.IncidentReportID;
+quit;
+
+/*proc rank to get top N rows by group*/
+proc rank data=all out=rank descending;
+   by prod;
+   var nek;
+   ranks r;
+proc sort data=rank out=want;
+	by prod r;
+	where r <= 10;   
+quit;
